@@ -11,15 +11,19 @@ const PORT = process.env.PORT || 3001;
 const OSK_CLIENT_ID = process.env.OSK_CLIENT_ID || process.env.OPENSKY_CLIENT_ID;
 const OSK_CLIENT_SECRET = process.env.OSK_CLIENT_SECRET || process.env.OPENSKY_CLIENT_SECRET;
 
-// Basic (usuario/contraseña del sitio OpenSky)
+// Basic (usuario/contraseña del sitio OpenSky) - opcional
 const OSK_USER = process.env.OPENSKY_USERNAME || process.env.OSK_USERNAME || '';
 const OSK_PASS = process.env.OPENSKY_PASSWORD || process.env.OSK_PASSWORD || '';
 
-// Proxy secret (para proteger rutas privadas)
+// Proxy secret (para rutas protegidas)
 const PROXY_SECRET = process.env.PROXY_SECRET || process.env.PROXY_AUTH_SECRET;
 
 // CORS
-const allowList = (process.env.ALLOW_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
+const allowList = (process.env.ALLOW_ORIGIN || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
 app.use(cors({
   origin: (origin, cb) => {
     if (!allowList.length || !origin || allowList.includes(origin)) cb(null, true);
@@ -27,16 +31,16 @@ app.use(cors({
   }
 }));
 
-// --- Config de tiempo y reintentos (puedes ajustarlos por ENV en Render) ---
-const TOKEN_TIMEOUT_MS = Number(process.env.TOKEN_TIMEOUT_MS || 30000);   // 30s
-const TOKEN_MAX_RETRIES = Number(process.env.TOKEN_MAX_RETRIES || 3);     // 3 intentos
+// --- Config de tiempo y reintentos (ajustables por ENV en Render) ---
+const TOKEN_TIMEOUT_MS = Number(process.env.TOKEN_TIMEOUT_MS || 30000);     // 30s
+const TOKEN_MAX_RETRIES = Number(process.env.TOKEN_MAX_RETRIES || 3);       // 3 intentos
 const TOKEN_RETRY_DELAY_MS = Number(process.env.TOKEN_RETRY_DELAY_MS || 1000); // 1s
 
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
 async function fetchWithRetry(url, opts={}, retries=TOKEN_MAX_RETRIES) {
   let lastErr, res;
-  for (let i=0; i<=retries; i++) {
+  for (let i = 0; i <= retries; i++) {
     try {
       res = await fetch(url, { ...opts, timeout: TOKEN_TIMEOUT_MS });
       return res; // devolvemos aunque sea 4xx/5xx; el caller decide
@@ -47,7 +51,6 @@ async function fetchWithRetry(url, opts={}, retries=TOKEN_MAX_RETRIES) {
   }
   throw lastErr;
 }
-
 
 app.use(express.json());
 
@@ -82,7 +85,6 @@ app.get('/opensky/token', async (_req, res) => {
   }
 });
 
-
 // ------------------------
 // Middleware de protección
 // (aplica a todo lo que está debajo)
@@ -115,7 +117,7 @@ app.get('/opensky/states', async (req, res) => {
       });
     }
 
-    const r = await fetch(url, { headers, timeout: 20000 }); // 20s
+    const r = await fetchWithRetry(url, { headers }, /*retries*/ TOKEN_MAX_RETRIES);
     const raw = await r.text();
     try {
       const json = JSON.parse(raw);
@@ -125,7 +127,7 @@ app.get('/opensky/states', async (req, res) => {
     }
   } catch (err) {
     console.error('Error /opensky/states:', err);
-    res.status(500).json({ error: String(err) });
+    res.status(504).json({ error: 'Upstream timeout', detail: String(err) });
   }
 });
 
