@@ -1,68 +1,38 @@
-require('dotenv').config();
-const express = require('express');
-const fetch = require('node-fetch'); // v2
-const cors = require('cors');
+import express from "express";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
 
-// --- Credenciales ---
-const OSK_CLIENT_ID     = process.env.OSK_CLIENT_ID     || process.env.OPENSKY_CLIENT_ID;
-const OSK_CLIENT_SECRET = process.env.OSK_CLIENT_SECRET || process.env.OPENSKY_CLIENT_SECRET;
-const OSK_USER          = process.env.OPENSKY_USERNAME  || process.env.OSK_USERNAME || '';
-const OSK_PASS          = process.env.OPENSKY_PASSWORD  || process.env.OSK_PASSWORD || '';
-const PROXY_SECRET      = process.env.PROXY_SECRET      || process.env.PROXY_AUTH_SECRET;
+// --- Configuración de credenciales ---
+const OSK_USER = process.env.OPENSKY_USERNAME;
+const OSK_PASS = process.env.OPENSKY_PASSWORD;
+const OSK_CLIENT_ID = process.env.OPENSKY_CLIENT_ID;
+const OSK_CLIENT_SECRET = process.env.OPENSKY_CLIENT_SECRET;
+const PROXY_SECRET = process.env.PROXY_SECRET || "tusecretoseguro123";
 
-// --- CORS ---
-const allowList = (process.env.ALLOW_ORIGIN || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!allowList.length || !origin || allowList.includes(origin)) cb(null, true);
-    else cb(new Error('No permitido por CORS'));
-  }
-}));
-
-app.use(express.json());
-
-// --- Config de timeout/reintentos (ajustable por ENV) ---
-// Para /opensky/token (OAuth)
-const TOKEN_TIMEOUT_MS     = Number(process.env.TOKEN_TIMEOUT_MS     || 15000);
-const TOKEN_MAX_RETRIES    = Number(process.env.TOKEN_MAX_RETRIES    || 0);
+// --- Config de timeout/reintentos para TOKEN ---
+const TOKEN_TIMEOUT_MS = Number(process.env.TOKEN_TIMEOUT_MS || 15000);
+const TOKEN_MAX_RETRIES = Number(process.env.TOKEN_MAX_RETRIES || 0);
 const TOKEN_RETRY_DELAY_MS = Number(process.env.TOKEN_RETRY_DELAY_MS || 1000);
 
-// Para /opensky/states (datos en vivo)
-const STATES_TIMEOUT_MS    = Number(process.env.STATES_TIMEOUT_MS    || 15000);
-const STATES_MAX_RETRIES   = Number(process.env.STATES_MAX_RETRIES   || 0);
+// --- Config de timeout/reintentos para STATES ---
+const STATES_TIMEOUT_MS = Number(process.env.STATES_TIMEOUT_MS || 15000);
+const STATES_MAX_RETRIES = Number(process.env.STATES_MAX_RETRIES || 0);
+const STATES_RETRY_DELAY_MS = Number(process.env.STATES_RETRY_DELAY_MS || 1000);
+const STATES_CACHE_MS = Number(process.env.STATES_CACHE_MS || 60000); // 1 min caché
 
+// --- Función genérica de reintentos ---
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-// Fetch con reintentos para /token
-async function fetchWithRetry(url, opts = {}, retries = TOKEN_MAX_RETRIES) {
+async function fetchWithRetry(url, opts = {}, retries = 0, delayMs = 1000) {
   let lastErr;
   for (let i = 0; i <= retries; i++) {
     try {
-      return await fetch(url, { ...opts, timeout: TOKEN_TIMEOUT_MS });
+      return await fetch(url, { ...opts, timeout: opts.timeout || 15000 });
     } catch (err) {
       lastErr = err;
-      if (i < retries) await sleep(TOKEN_RETRY_DELAY_MS);
-    }
-  }
-  throw lastErr;
-}
-
-// Fetch con reintentos para /states
-async function fetchStatesWithRetry(url, opts = {}, retries = STATES_MAX_RETRIES) {
-  let lastErr;
-  for (let i = 0; i <= retries; i++) {
-    try {
-      return await fetch(url, { ...opts, timeout: STATES_TIMEOUT_MS });
-    } catch (err) {
-      lastErr = err;
-      if (i < retries) await sleep(TOKEN_RETRY_DELAY_MS);
+      if (i < retries) await sleep(delayMs);
     }
   }
   throw lastErr;
@@ -74,101 +44,110 @@ const oauthConfigured = !!(OSK_CLIENT_ID && OSK_CLIENT_SECRET);
 const basicConfigured = !!(OSK_USER && OSK_PASS);
 
 async function fetchTokenFromOpenSky() {
-  if (!oauthConfigured) throw new Error('OAuth no configurado');
+  if (!oauthConfigured) throw new Error("OAuth no configurado");
 
   const r = await fetchWithRetry(
-    'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
+    "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token",
     {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        grant_type: 'client_credentials',
+        grant_type: "client_credentials",
         client_id: OSK_CLIENT_ID,
         client_secret: OSK_CLIENT_SECRET
-      })
-    }
+      }),
+      timeout: TOKEN_TIMEOUT_MS
+    },
+    TOKEN_MAX_RETRIES,
+    TOKEN_RETRY_DELAY_MS
   );
 
-  const raw = await r.text();
-  let data;
-  try { data = JSON.parse(raw); } catch { data = { raw }; }
-  if (data.access_token) {
-    data.expires_at = Date.now() + ((data.expires_in || 0) * 1000);
-    cachedToken = data;
-  }
-  return data;
+  const data = await r.json();
+  if (!data.access_token) throw new Error(`OAuth error: ${JSON.stringify(data)}`);
+
+  cachedToken = {
+    access_token: data.access_token,
+    expires_at: Date.now() + (data.expires_in || 300) * 1000 - 5000
+  };
+  return cachedToken.access_token;
 }
 
-// ------------------------
-// Rutas públicas
-// ------------------------
-app.get('/health', (_req, res) => {
+async function getAuthHeader() {
+  if (basicConfigured) {
+    return "Basic " + Buffer.from(`${OSK_USER}:${OSK_PASS}`).toString("base64");
+  }
+  if (!cachedToken || Date.now() >= cachedToken.expires_at) {
+    await fetchTokenFromOpenSky();
+  }
+  return `Bearer ${cachedToken.access_token}`;
+}
+
+app.use(express.json());
+
+// --- Health check ---
+app.get("/health", (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
-// Obtener token (OAuth)
-app.get('/opensky/token', async (_req, res) => {
+// --- Token info ---
+app.get("/opensky/token", async (_req, res) => {
   try {
     if (basicConfigured) {
-      return res.json({ ok: true, msg: 'Usando Basic Auth, no se requiere token OAuth' });
+      return res.json({ ok: true, msg: "Usando Basic Auth, no se requiere token OAuth" });
     }
-    const now = Date.now();
-    if (cachedToken && cachedToken.expires_at > now + 5000) {
-      return res.json(cachedToken);
-    }
-    const tokenData = await fetchTokenFromOpenSky();
-    res.json(tokenData);
+    const token = await getAuthHeader();
+    res.json({ ok: true, token });
   } catch (err) {
-    console.error('Error /opensky/token:', err);
-    res.status(504).json({ error: 'Upstream timeout', detail: String(err) });
+    res.status(500).json({ error: String(err) });
   }
 });
 
-// ------------------------
-// Middleware protegido
-// ------------------------
+// --- Middleware de protección ---
 app.use((req, res, next) => {
-  const secret = req.headers['x-proxy-secret'];
-  if (secret !== PROXY_SECRET) return res.status(403).json({ error: 'Unauthorized' });
+  const sec = req.headers["x-proxy-secret"];
+  if (sec !== PROXY_SECRET) return res.status(403).json({ error: "Forbidden" });
   next();
 });
 
-// ------------------------
-// Rutas protegidas
-// ------------------------
-app.get('/opensky/states', async (req, res) => {
+// --- Caché de estados ---
+let lastStates = null;
+let lastStatesTs = 0;
+
+// --- Endpoint de estados ---
+app.get("/opensky/states", async (req, res) => {
+  const now = Date.now();
+  if (lastStates && now - lastStatesTs < STATES_CACHE_MS) {
+    return res.json({ fromCache: true, data: lastStates });
+  }
+
   try {
-    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-    const url = 'https://opensky-network.org/api/states/all' + qs;
+    const authHeader = await getAuthHeader();
+    const url = `https://opensky-network.org/api/states/all?${new URLSearchParams(req.query)}`;
 
-    let headers = {};
-    if (basicConfigured) {
-      headers.Authorization = 'Basic ' + Buffer.from(`${OSK_USER}:${OSK_PASS}`).toString('base64');
-    } else {
-      const now = Date.now();
-      if (!cachedToken || cachedToken.expires_at <= now + 5000) {
-        await fetchTokenFromOpenSky();
-      }
-      if (!cachedToken || !cachedToken.access_token) {
-        return res.status(500).json({ error: 'No se pudo obtener token OAuth' });
-      }
-      headers.Authorization = `Bearer ${cachedToken.access_token}`;
-    }
+    const r = await fetchWithRetry(
+      url,
+      {
+        headers: { Authorization: authHeader },
+        timeout: STATES_TIMEOUT_MS
+      },
+      STATES_MAX_RETRIES,
+      STATES_RETRY_DELAY_MS
+    );
 
-    const r = await fetchStatesWithRetry(url, { headers });
-    const raw = await r.text();
-    try {
-      const json = JSON.parse(raw);
-      return res.status(r.status).json(json);
-    } catch {
-      return res.status(r.status).json({ raw });
-    }
+    const data = await r.json();
+    lastStates = data;
+    lastStatesTs = now;
+
+    res.json({ fromCache: false, data });
   } catch (err) {
-    console.error('Error /opensky/states:', err);
-    res.status(504).json({ error: 'Upstream timeout', detail: String(err) });
+    if (lastStates) {
+      res.json({ fromCache: true, stale: true, data: lastStates });
+    } else {
+      res.status(504).json({ error: "Upstream timeout", detail: String(err) });
+    }
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Servidor proxy en puerto ${PORT}`);
-});
+// --- Start ---
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log(`Proxy listening on ${PORT}`));
