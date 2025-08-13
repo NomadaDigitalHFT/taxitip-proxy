@@ -1,34 +1,41 @@
+// server.js
 require('dotenv').config();
 const express = require('express');
-const fetch = require('node-fetch');
+const fetch = require('node-fetch'); // v2
 const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// OAuth (client credentials)
 const OSK_CLIENT_ID = process.env.OSK_CLIENT_ID || process.env.OPENSKY_CLIENT_ID;
 const OSK_CLIENT_SECRET = process.env.OSK_CLIENT_SECRET || process.env.OPENSKY_CLIENT_SECRET;
-const PROXY_SECRET = process.env.PROXY_SECRET || process.env.PROXY_AUTH_SECRET;
-const ALLOW_ORIGIN = (process.env.ALLOW_ORIGIN || '').split(',');
 
+// Basic (usuario/contraseña del sitio OpenSky)
+const OSK_USER = process.env.OPENSKY_USERNAME || process.env.OSK_USERNAME || '';
+const OSK_PASS = process.env.OPENSKY_PASSWORD || process.env.OSK_PASSWORD || '';
+
+// Proxy secret (para proteger rutas privadas)
+const PROXY_SECRET = process.env.PROXY_SECRET || process.env.PROXY_AUTH_SECRET;
+
+// CORS
+const allowList = (process.env.ALLOW_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || ALLOW_ORIGIN.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('No permitido por CORS'));
-    }
+  origin: (origin, cb) => {
+    if (!allowList.length || !origin || allowList.includes(origin)) cb(null, true);
+    else cb(new Error('No permitido por CORS'));
   }
 }));
 
 app.use(express.json());
 
-// ✅ RUTA PÚBLICA
+// ------------------------
+// Rutas públicas
+// ------------------------
 app.get('/health', (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
-// ✅ RUTA PÚBLICA PARA OBTENER TOKEN
 app.get('/opensky/token', async (_req, res) => {
   try {
     const tokenResponse = await fetch(
@@ -40,50 +47,64 @@ app.get('/opensky/token', async (_req, res) => {
           grant_type: 'client_credentials',
           client_id: OSK_CLIENT_ID,
           client_secret: OSK_CLIENT_SECRET
-        })
+        }),
+        timeout: 15000 // 15s
       }
     );
 
     const rawText = await tokenResponse.text();
     let data;
-    try {
-      data = JSON.parse(rawText);
-    } catch {
-      data = { raw: rawText };
-    }
-
+    try { data = JSON.parse(rawText); } catch { data = { raw: rawText }; }
     res.status(tokenResponse.status).json(data);
-  } catch (error) {
-    console.error('Error al obtener token:', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    console.error('Error /opensky/token:', err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
-// 🔐 MIDDLEWARE: aplica a todo lo que esté debajo (requiere clave)
+// ------------------------
+// Middleware de protección
+// (aplica a todo lo que está debajo)
+// ------------------------
 app.use((req, res, next) => {
   const secret = req.headers['x-proxy-secret'];
-  if (secret !== PROXY_SECRET) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
+  if (secret !== PROXY_SECRET) return res.status(403).json({ error: 'Unauthorized' });
   next();
 });
 
-// 🔐 RUTA PROTEGIDA
+// ------------------------
+// Rutas protegidas
+// ------------------------
 app.get('/opensky/states', async (req, res) => {
   try {
-    const token = req.query.token;
-    const url = 'https://opensky-network.org/api/states/all' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
-    
-    const headers = token
-      ? { Authorization: `Bearer ${token}` }
-      : { Authorization: 'Basic ' + Buffer.from(`${OSK_CLIENT_ID}:${OSK_CLIENT_SECRET}`).toString('base64') };
+    // Reenvía todos los query params (lamin, lamax, etc.)
+    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    const url = 'https://opensky-network.org/api/states/all' + qs;
 
-    const statesResponse = await fetch(url, { headers });
-    const data = await statesResponse.json();
-    res.json(data);
-  } catch (error) {
-    console.error('Error al obtener datos de vuelos:', error);
-    res.status(500).json({ error: 'Error interno' });
+    // Preferir Bearer si viene ?token=..., si no hay token y tienes user/pass, usa Basic
+    const token = req.query.token;
+    let headers = {};
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    } else if (OSK_USER && OSK_PASS) {
+      headers.Authorization = 'Basic ' + Buffer.from(`${OSK_USER}:${OSK_PASS}`).toString('base64');
+    } else {
+      return res.status(400).json({
+        error: 'Falta token (?token=) o credenciales Basic (OPENSKY_USERNAME/OPENSKY_PASSWORD)'
+      });
+    }
+
+    const r = await fetch(url, { headers, timeout: 20000 }); // 20s
+    const raw = await r.text();
+    try {
+      const json = JSON.parse(raw);
+      return res.status(r.status).json(json);
+    } catch {
+      return res.status(r.status).json({ raw });
+    }
+  } catch (err) {
+    console.error('Error /opensky/states:', err);
+    res.status(500).json({ error: String(err) });
   }
 });
 
