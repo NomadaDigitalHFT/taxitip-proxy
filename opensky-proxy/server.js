@@ -23,26 +23,14 @@ app.use(cors({
 
 app.use(express.json());
 
-// Middleware de autenticación
-app.use((req, res, next) => {
-  const secret = req.headers['x-proxy-secret'];
-  if (secret !== PROXY_SECRET) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-  next();
-});
-
-// Health check
+// ✅ RUTA PÚBLICA
 app.get('/health', (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
-// Obtener token de OpenSky
+// ✅ RUTA PÚBLICA PARA OBTENER TOKEN
 app.get('/opensky/token', async (_req, res) => {
   try {
-    console.log('Solicitando token a OpenSky...');
-    console.log('CLIENT_ID usado:', OSK_CLIENT_ID);
-
     const tokenResponse = await fetch(
       'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
       {
@@ -56,10 +44,7 @@ app.get('/opensky/token', async (_req, res) => {
       }
     );
 
-    console.log('Respuesta recibida. Status:', tokenResponse.status);
     const rawText = await tokenResponse.text();
-    console.log('Cuerpo de respuesta:', rawText);
-
     let data;
     try {
       data = JSON.parse(rawText);
@@ -74,21 +59,26 @@ app.get('/opensky/token', async (_req, res) => {
   }
 });
 
-// Obtener estados de vuelos
+// 🔐 MIDDLEWARE: aplica a todo lo que esté debajo (requiere clave)
+app.use((req, res, next) => {
+  const secret = req.headers['x-proxy-secret'];
+  if (secret !== PROXY_SECRET) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  next();
+});
+
+// 🔐 RUTA PROTEGIDA
 app.get('/opensky/states', async (req, res) => {
   try {
     const token = req.query.token;
-    const url = 'https://opensky-network.org/api/states/all' +
-                (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
-
+    const url = 'https://opensky-network.org/api/states/all' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+    
     const headers = token
       ? { Authorization: `Bearer ${token}` }
       : { Authorization: 'Basic ' + Buffer.from(`${OSK_CLIENT_ID}:${OSK_CLIENT_SECRET}`).toString('base64') };
 
-    console.log('Solicitando estados de vuelos a:', url);
     const statesResponse = await fetch(url, { headers });
-    console.log('Respuesta estados. Status:', statesResponse.status);
-
     const data = await statesResponse.json();
     res.json(data);
   } catch (error) {
@@ -100,4 +90,3 @@ app.get('/opensky/states', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor proxy en puerto ${PORT}`);
 });
-
