@@ -37,23 +37,34 @@ app.get('/health', (_req, res) => {
 
 app.get('/opensky/token', async (_req, res) => {
   try {
-    const tokenResponse = await fetch('https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: OSK_CLIENT_ID,
-        client_secret: OSK_CLIENT_SECRET
-      })
-    });
+    const tokenResponse = await fetch(
+      'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: OSK_CLIENT_ID,
+          client_secret: OSK_CLIENT_SECRET
+        })
+      }
+    );
 
-    const data = await tokenResponse.json();
-    res.json(data);
+    const rawText = await tokenResponse.text();
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = { raw: rawText };
+    }
+
+    res.status(tokenResponse.status).json(data);
   } catch (error) {
     console.error('Error al obtener token:', error);
-    res.status(500).json({ error: 'Error interno' });
+    res.status(500).json({ error: error.message });
   }
 });
+;
 
 app.get('/opensky/states', async (req, res) => {
   try {
