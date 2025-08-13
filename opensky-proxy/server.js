@@ -13,23 +13,23 @@ const OSK_CLIENT_SECRET = process.env.OPENSKY_CLIENT_SECRET;
 const PROXY_SECRET = process.env.PROXY_SECRET || "tusecretoseguro123";
 
 // --- Config de timeout/reintentos para TOKEN ---
-const TOKEN_TIMEOUT_MS = Number(process.env.TOKEN_TIMEOUT_MS || 15000);
-const TOKEN_MAX_RETRIES = Number(process.env.TOKEN_MAX_RETRIES || 0);
+const TOKEN_TIMEOUT_MS     = Number(process.env.TOKEN_TIMEOUT_MS     || 15000);
+const TOKEN_MAX_RETRIES    = Number(process.env.TOKEN_MAX_RETRIES    || 0);
 const TOKEN_RETRY_DELAY_MS = Number(process.env.TOKEN_RETRY_DELAY_MS || 1000);
 
 // --- Config de timeout/reintentos para STATES ---
-const STATES_TIMEOUT_MS = Number(process.env.STATES_TIMEOUT_MS || 15000);
-const STATES_MAX_RETRIES = Number(process.env.STATES_MAX_RETRIES || 0);
+const STATES_TIMEOUT_MS     = Number(process.env.STATES_TIMEOUT_MS     || 15000);
+const STATES_MAX_RETRIES    = Number(process.env.STATES_MAX_RETRIES    || 0);
 const STATES_RETRY_DELAY_MS = Number(process.env.STATES_RETRY_DELAY_MS || 1000);
-const STATES_CACHE_MS = Number(process.env.STATES_CACHE_MS || 60000); // 1 min caché
+const STATES_CACHE_MS       = Number(process.env.STATES_CACHE_MS       || 60000); // 1 min caché
 
 // --- Función genérica de reintentos ---
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function fetchWithRetry(url, opts = {}, retries = 0, delayMs = 1000) {
+async function fetchWithRetry(url, opts = {}, retries = 0, delayMs = 1000, timeoutMs = 15000) {
   let lastErr;
   for (let i = 0; i <= retries; i++) {
     try {
-      return await fetch(url, { ...opts, timeout: opts.timeout || 15000 });
+      return await fetch(url, { ...opts, timeout: timeoutMs });
     } catch (err) {
       lastErr = err;
       if (i < retries) await sleep(delayMs);
@@ -37,6 +37,13 @@ async function fetchWithRetry(url, opts = {}, retries = 0, delayMs = 1000) {
   }
   throw lastErr;
 }
+
+// Ejemplo de uso para token
+// await fetchWithRetry(tokenUrl, fetchOpts, TOKEN_MAX_RETRIES, TOKEN_RETRY_DELAY_MS, TOKEN_TIMEOUT_MS);
+
+// Ejemplo de uso para states
+// await fetchWithRetry(statesUrl, fetchOpts, STATES_MAX_RETRIES, STATES_RETRY_DELAY_MS, STATES_TIMEOUT_MS);
+
 
 // --- Caché de token OAuth ---
 let cachedToken = null; // { access_token, expires_at }
